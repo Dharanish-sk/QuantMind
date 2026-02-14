@@ -3,7 +3,7 @@ import { render, Box, Text } from "ink";
 import { config } from "dotenv";
 import { Input } from "./components/input";
 import { callLlm } from "./model/llm";
-
+import { Intro } from "./components/intro";
 // Load .env file (API keys)
 config({ quiet: true });
 
@@ -32,6 +32,8 @@ function App() {
   }
 
   return (
+    <>
+    <Intro />
     <Box flexDirection="column">
       {/* Header */}
       <Text color="cyan" bold>
@@ -54,6 +56,7 @@ function App() {
         </Box>
       )}
     </Box>
+    </>
   );
 }
 
