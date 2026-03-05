@@ -197,7 +197,7 @@ export class Scratchpad {
     toolName: string,
     args: Record<string, unknown>,
     result: string,
-    llmSummary: string
+    llmSummary?: string
   ): void {
     this.append({
       type: "tool_result",
@@ -288,6 +288,78 @@ export class Scratchpad {
         llmSummary: e.llmSummary || "",
         index,
       }));
+  }
+
+  /**
+   * Get ALL tool results as a single formatted string.
+   * Used in the iteration prompt — the LLM sees this during the agent loop.
+   *
+   * Returns something like:
+   *   "## get_price_snapshot({ticker: "AAPL"})
+   *    Result: {"price": 228.50, "change": "+1.2%"}
+   *
+   *    ## web_search({query: "Apple earnings"})
+   *    Result: Apple reported record earnings..."
+   */
+  getToolResults(): string {
+    return this.readEntries()
+      .filter((e) => e.type === "tool_result" && e.toolName)
+      .map((e) => {
+        const argsStr = JSON.stringify(e.args || {});
+        const resultStr = this.stringifyResult(e.result);
+        return `## ${e.toolName}(${argsStr})\nResult: ${resultStr}`;
+      })
+      .join("\n\n");
+  }
+
+  /**
+   * Clear the OLDEST tool results, keeping only the N most recent.
+   *
+   * WHY? During a long research session, tool results accumulate.
+   * If they exceed the context window, we need to trim.
+   *
+   * HOW IT WORKS:
+   *   1. Read all entries from JSONL
+   *   2. Separate tool_result entries from others (init, thinking)
+   *   3. If tool results exceed `keep`, remove the oldest ones
+   *   4. Re-write the JSONL file with remaining entries
+   *
+   * The removed data is NOT lost — it was already saved to disk.
+   * We can reload it later for the final answer using getFullContexts().
+   *
+   * NOTE: This rewrites the file (not append-only for this operation).
+   * This is the ONLY method that rewrites — all others append.
+   *
+   * @param keep - Number of most recent tool results to keep
+   * @returns Number of entries that were cleared
+   */
+  clearOldestToolResults(keep: number): number {
+    const allEntries = this.readEntries();
+
+    // Separate tool results from other entries
+    const toolResults = allEntries.filter((e) => e.type === "tool_result");
+    const otherEntries = allEntries.filter((e) => e.type !== "tool_result");
+
+    // If we have fewer tool results than the keep limit, nothing to clear
+    if (toolResults.length <= keep) return 0;
+
+    // Keep only the most recent `keep` tool results
+    const keptResults = toolResults.slice(-keep);
+    //                               ^^^^^^^^
+    // .slice(-5) = last 5 elements
+    // [a, b, c, d, e, f, g].slice(-5) → [c, d, e, f, g]
+
+    const clearedCount = toolResults.length - keptResults.length;
+
+    // Re-write file with: init + thinking + kept tool results
+    const remaining = [...otherEntries, ...keptResults];
+    const { writeFileSync } = require("fs");
+    writeFileSync(
+      this.filepath,
+      remaining.map((e) => JSON.stringify(e)).join("\n") + "\n"
+    );
+
+    return clearedCount;
   }
 
   /**

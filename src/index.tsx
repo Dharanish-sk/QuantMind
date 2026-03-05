@@ -22,8 +22,10 @@ function App() {
     setAnswer("");
 
     try {
-      const response = await callLlm(query, "You are a helpful assistant.");
-      setAnswer(response);
+      const result = await callLlm(query, { systemPrompt: "You are a helpful assistant." });
+      // result.response can be string or AIMessage — for simple chat, it's a string
+      const text = typeof result.response === 'string' ? result.response : String(result.response);
+      setAnswer(text);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
