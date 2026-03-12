@@ -111,7 +111,7 @@ export function parseSearchResults(results: unknown): {
 
     // Try common field names for results array
     const resultsArray =
-      obj.results || obj.items || obj.hits || obj.data || obj.webPages?.value;
+      obj.results || obj.items || obj.hits || obj.data || (obj.webPages as Record<string, unknown> | undefined)?.value;
 
     if (Array.isArray(resultsArray)) {
       return parseSearchResults(resultsArray);

@@ -22,28 +22,30 @@ export function Intro() {
 
       <Box marginTop={1}>
         <Text color={colors.primary} bold>
-          {` 
+          {`
  ██████╗ ██╗   ██╗ █████╗ ███╗   ██╗████████╗
 ██╔═══██╗██║   ██║██╔══██╗████╗  ██║╚══██╔══╝
-██║   ██║██║   ██║███████║██╔██╗ ██║   ██║   
-██║▄▄ ██║██║   ██║██╔══██║██║╚██╗██║   ██║   
-╚██████╔╝╚██████╔╝██║  ██║██║ ╚████║   ██║   
- ╚══▀▀═╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝      
+██║   ██║██║   ██║███████║██╔██╗ ██║   ██║
+██║▄▄ ██║██║   ██║██╔══██║██║╚██╗██║   ██║
+╚██████╔╝╚██████╔╝██║  ██║██║ ╚████║   ██║
+ ╚══▀▀═╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝
 ═══════════════════════════════════════════
-
-Your AI assistant for financial research.
-Current model: gemini-2.5-flash
 `}
         </Text>
       </Box>
 
-      {/* <Box marginY={1} flexDirection="column">
-        <Text>Your AI assistant for deep financial research.</Text>
-        <Text color={colors.muted}>Model: <Text color={colors.primary}>{getModelDisplayName(model)}.</Text> Type /model to change.</Text>
-      </Box> */}
+      <Box flexDirection="column">
+        <Text>Your AI-powered financial research agent.</Text>
+        <Text color={colors.muted}>
+          Model: <Text color={colors.primary}>gemini-2.5-flash</Text> | Inspired by <Text color={colors.accent}>Dexter</Text>
+        </Text>
+        <Text color={colors.muted}>
+          15 tools: financials, prices, ratios, news, insider trades, crypto & more
+        </Text>
+        <Text color={colors.muted}>
+          Press <Text color={colors.white}>Escape</Text> to exit
+        </Text>
+      </Box>
     </Box>
   );
 }
-
-
-

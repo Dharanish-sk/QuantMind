@@ -1,258 +1,383 @@
 /**
  * ============================================================
- * TOOL REGISTRY — Central Hub for All Agent Tools
+ * TOOL REGISTRY — QuantMind's Tool Management System
  * ============================================================
  *
- * The registry is like a "menu" of tools available to the agent.
+ * The registry is the "menu" of tools available to the agent.
  * It handles:
  *   1. Registering all tools in one place
- *   2. Conditionally loading tools based on API keys
- *   3. Building tool descriptions for the system prompt
+ *   2. Conditionally enabling tools based on API keys
+ *   3. Building rich descriptions for the system prompt
+ *   4. Categorizing tools for better organization
  *
- * WHY A REGISTRY?
- * ----------------
- * Without a registry, you'd have to:
- *   - Import tools in multiple places
- *   - Check API keys everywhere
- *   - Manually keep descriptions in sync
- *
- * With a registry:
- *   - One import: getTools(model)
- *   - API key checks in one place
- *   - Descriptions automatically generated
- *
- * HOW IT WORKS
- * ------------
- *
- * 1. Each tool is registered with:
- *    - name: What the LLM calls it ("web_search")
- *    - tool: The actual DynamicStructuredTool instance
- *    - description: Rich description for the system prompt
- *
- * 2. getTools(model) returns just the tool instances
- *    → Used by agent.ts to bind tools to the LLM
- *
- * 3. buildToolDescriptions(model) returns formatted descriptions
- *    → Used by prompts.ts to build the system prompt
+ * INSPIRED BY DEXTER:
+ * -------------------
+ * Following Dexter's pattern of:
+ *   - Category-based organization (MARKET_DATA, FUNDAMENTALS, etc.)
+ *   - Rich metadata for system prompt injection
+ *   - Conditional tool loading based on env vars
+ *   - Meta-tool (financial_search) as primary entry point
  */
 
 import type { StructuredToolInterface } from "@langchain/core/tools";
 
-// Import tools (we'll create these next)
-// For now, we'll have placeholder imports that we'll fill in
-import { webSearchTool } from "./search/tavily";
+// Import all tools
 import {
+  getPriceSnapshot,
+  getStockPrices,
   getIncomeStatements,
   getBalanceSheets,
   getCashFlowStatements,
-} from "./finance/fundamentals";
-import { getPriceSnapshot } from "./finance/prices";
+  getAllFinancialStatements,
+  getKeyRatios,
+  getAnalystEstimates,
+  getCompanyNews,
+  getInsiderTrades,
+  getSegmentedRevenues,
+  getCryptoPriceSnapshot,
+  getCryptoPrices,
+} from "./finance";
+import { createFinancialSearch } from "./finance/financial-search";
+import { webSearchTool } from "./search";
 
 // ============================================================================
 // Types
 // ============================================================================
 
-/**
- * A registered tool with its rich description.
- *
- * The description is SEPARATE from the tool's built-in description because:
- * - Tool descriptions are short (one line, for the LLM's function call UI)
- * - Rich descriptions are long (when to use, when NOT to use, examples)
- *
- * The rich description goes in the SYSTEM PROMPT where the LLM has more
- * context to make good decisions about which tool to use.
- */
+export type ToolCategory =
+  | "META"
+  | "MARKET_DATA"
+  | "FUNDAMENTALS"
+  | "METRICS"
+  | "INTELLIGENCE"
+  | "CRYPTO"
+  | "RESEARCH";
+
 export interface RegisteredTool {
-  /** Tool name (must match tool.name exactly) */
   name: string;
-
-  /** The actual tool instance */
   tool: StructuredToolInterface;
-
-  /** Rich description for the system prompt */
-  description: string;
+  category: ToolCategory;
+  shortDescription: string;
+  whenToUse: string[];
+  whenNotToUse?: string[];
+  requiresApiKey?: string;
 }
 
 // ============================================================================
-// Tool Descriptions (Rich descriptions for system prompt)
+// Tool Definitions
 // ============================================================================
 
 /**
- * Rich description for web_search tool.
- *
- * Notice the structure:
- * - What it does
- * - When to use it
- * - When NOT to use it (very important!)
- * - Example queries
+ * Build tool definitions for a given model.
+ * The model is needed for the financial_search meta-tool (it calls the LLM internally).
  */
-const WEB_SEARCH_DESCRIPTION = `Search the web for current information.
+function buildToolDefinitions(model: string): RegisteredTool[] {
+  return [
+    // ─────────────────────────────────────────────────────────────────────
+    // META TOOLS (intelligent routing — Dexter's pattern)
+    // ─────────────────────────────────────────────────────────────────────
+    {
+      name: "financial_search",
+      tool: createFinancialSearch(model),
+      category: "META",
+      shortDescription:
+        "Intelligent meta-tool — routes natural language queries to the best financial tools",
+      whenToUse: [
+        "ANY financial data query (prices, statements, ratios, news)",
+        "Multi-company comparisons",
+        "Complex queries needing multiple data sources",
+      ],
+      whenNotToUse: [
+        "General knowledge questions (use web_search)",
+        "Non-financial queries",
+      ],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
 
-**When to use:**
-- Current events, news, recent announcements
-- Information that changes frequently
-- Topics not covered by financial tools
+    // ─────────────────────────────────────────────────────────────────────
+    // MARKET DATA TOOLS
+    // ─────────────────────────────────────────────────────────────────────
+    {
+      name: "get_price_snapshot",
+      tool: getPriceSnapshot,
+      category: "MARKET_DATA",
+      shortDescription: "Get current stock price, change, volume, market data",
+      whenToUse: [
+        "Current/latest stock price",
+        "Today's price movement",
+        "Quick price check",
+      ],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
+    {
+      name: "get_stock_prices",
+      tool: getStockPrices,
+      category: "MARKET_DATA",
+      shortDescription: "Historical OHLCV price data over a date range",
+      whenToUse: [
+        "Price trends over time",
+        "Historical price analysis",
+        "Price comparisons between dates",
+      ],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
 
-**When NOT to use:**
-- Financial data (use financial tools instead - they're more accurate)
-- Historical facts that don't change
+    // ─────────────────────────────────────────────────────────────────────
+    // FUNDAMENTALS TOOLS
+    // ─────────────────────────────────────────────────────────────────────
+    {
+      name: "get_income_statements",
+      tool: getIncomeStatements,
+      category: "FUNDAMENTALS",
+      shortDescription: "Revenue, profit, EPS, margins",
+      whenToUse: [
+        "Revenue or sales analysis",
+        "Profitability assessment",
+        "Earnings or EPS lookup",
+      ],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
+    {
+      name: "get_balance_sheets",
+      tool: getBalanceSheets,
+      category: "FUNDAMENTALS",
+      shortDescription: "Assets, liabilities, debt, equity, cash",
+      whenToUse: [
+        "Debt levels and leverage",
+        "Cash position",
+        "Financial health assessment",
+      ],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
+    {
+      name: "get_cash_flow_statements",
+      tool: getCashFlowStatements,
+      category: "FUNDAMENTALS",
+      shortDescription: "Operating/investing/financing cash flows, FCF",
+      whenToUse: [
+        "Cash flow analysis",
+        "Free cash flow lookup",
+        "Dividend sustainability check",
+      ],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
+    {
+      name: "get_all_financial_statements",
+      tool: getAllFinancialStatements,
+      category: "FUNDAMENTALS",
+      shortDescription: "All three statements in one call",
+      whenToUse: ["Comprehensive financial analysis needing all statements"],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
 
-**Example queries:**
-- "Apple Q4 2025 earnings call highlights"
-- "Latest Fed interest rate decision"
-- "Tesla Cybertruck reviews"`;
+    // ─────────────────────────────────────────────────────────────────────
+    // METRICS & INTELLIGENCE TOOLS
+    // ─────────────────────────────────────────────────────────────────────
+    {
+      name: "get_key_ratios",
+      tool: getKeyRatios,
+      category: "METRICS",
+      shortDescription: "P/E, EV/EBITDA, ROE, ROA, margins, dividend yield",
+      whenToUse: [
+        "Valuation ratios",
+        "Profitability metrics",
+        "Historical ratio trends",
+      ],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
+    {
+      name: "get_analyst_estimates",
+      tool: getAnalystEstimates,
+      category: "METRICS",
+      shortDescription: "Consensus EPS and revenue estimates",
+      whenToUse: [
+        "Market expectations",
+        "Forward-looking analysis",
+        "Earnings estimate comparisons",
+      ],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
+    {
+      name: "get_company_news",
+      tool: getCompanyNews,
+      category: "INTELLIGENCE",
+      shortDescription: "Recent news headlines for a ticker",
+      whenToUse: [
+        "Price move catalysts",
+        "Recent announcements",
+        "Company event tracking",
+      ],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
+    {
+      name: "get_insider_trades",
+      tool: getInsiderTrades,
+      category: "INTELLIGENCE",
+      shortDescription: "SEC Form 4 insider buy/sell transactions",
+      whenToUse: [
+        "Insider buying/selling activity",
+        "Executive stock transactions",
+        "Insider sentiment analysis",
+      ],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
+    {
+      name: "get_segmented_revenues",
+      tool: getSegmentedRevenues,
+      category: "INTELLIGENCE",
+      shortDescription: "Revenue breakdown by segment/region",
+      whenToUse: [
+        "Revenue composition analysis",
+        "Segment growth trends",
+        "Geographic revenue breakdown",
+      ],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
 
-/**
- * Rich description for get_income_statements tool.
- */
-const INCOME_STATEMENTS_DESCRIPTION = `Fetch a company's income statements.
+    // ─────────────────────────────────────────────────────────────────────
+    // CRYPTO TOOLS
+    // ─────────────────────────────────────────────────────────────────────
+    {
+      name: "get_crypto_price_snapshot",
+      tool: getCryptoPriceSnapshot,
+      category: "CRYPTO",
+      shortDescription: "Current cryptocurrency price",
+      whenToUse: ["Current crypto price check", "Bitcoin/Ethereum prices"],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
+    {
+      name: "get_crypto_prices",
+      tool: getCryptoPrices,
+      category: "CRYPTO",
+      shortDescription: "Historical crypto OHLCV data",
+      whenToUse: [
+        "Crypto price trends",
+        "Historical crypto analysis",
+      ],
+      requiresApiKey: "FINANCIAL_DATASETS_API_KEY",
+    },
 
-**What it returns:**
-- Revenue, cost of goods sold, gross profit
-- Operating expenses, operating income
-- Net income, earnings per share
-
-**When to use:**
-- Analyzing profitability
-- Comparing revenue growth year-over-year
-- Understanding cost structure
-
-**Parameters:**
-- ticker: Stock symbol (e.g., "AAPL")
-- period: "annual", "quarterly", or "ttm"
-- limit: Number of periods to fetch (default: 5)`;
-
-const BALANCE_SHEETS_DESCRIPTION = `Fetch a company's balance sheets.
-
-**What it returns:**
-- Assets (cash, inventory, property)
-- Liabilities (debt, accounts payable)
-- Shareholders' equity
-
-**When to use:**
-- Analyzing financial health
-- Understanding capital structure
-- Evaluating liquidity`;
-
-const CASH_FLOW_DESCRIPTION = `Fetch a company's cash flow statements.
-
-**What it returns:**
-- Operating cash flow
-- Investing cash flow
-- Financing cash flow
-- Free cash flow
-
-**When to use:**
-- Understanding how cash is generated and used
-- Evaluating sustainability of operations`;
-
-const PRICE_SNAPSHOT_DESCRIPTION = `Get current stock price and basic market data.
-
-**What it returns:**
-- Current price
-- Day's high/low
-- Volume
-- Change ($ and %)
-
-**When to use:**
-- Checking current stock price
-- Basic market data lookup`;
+    // ─────────────────────────────────────────────────────────────────────
+    // RESEARCH TOOLS
+    // ─────────────────────────────────────────────────────────────────────
+    {
+      name: "web_search",
+      tool: webSearchTool,
+      category: "RESEARCH",
+      shortDescription: "Search the web for news and general information",
+      whenToUse: [
+        "General knowledge questions",
+        "Recent news not in financial tools",
+        "Non-financial queries",
+      ],
+      whenNotToUse: [
+        "Stock prices (use get_price_snapshot)",
+        "Financial data (use financial_search)",
+      ],
+    },
+  ];
+}
 
 // ============================================================================
 // Registry Functions
 // ============================================================================
 
+function isToolAvailable(tool: RegisteredTool): boolean {
+  if (!tool.requiresApiKey) return true;
+  return !!process.env[tool.requiresApiKey];
+}
+
 /**
- * Get all registered tools with their descriptions.
- *
- * Conditionally includes tools based on environment variables.
- * If an API key isn't set, the tool isn't included.
- *
- * @param _model - Model name (for future model-specific tools)
- * @returns Array of registered tools
+ * Get all available tools for a given model.
+ * The model is needed for meta-tools that call the LLM internally.
  */
-export function getToolRegistry(_model: string): RegisteredTool[] {
-  const tools: RegisteredTool[] = [];
-
-  // ── Financial Tools (always available with FINANCIAL_DATASETS_API_KEY) ──
-  if (process.env.FINANCIAL_DATASETS_API_KEY) {
-    tools.push(
-      {
-        name: "get_income_statements",
-        tool: getIncomeStatements,
-        description: INCOME_STATEMENTS_DESCRIPTION,
-      },
-      {
-        name: "get_balance_sheets",
-        tool: getBalanceSheets,
-        description: BALANCE_SHEETS_DESCRIPTION,
-      },
-      {
-        name: "get_cash_flow_statements",
-        tool: getCashFlowStatements,
-        description: CASH_FLOW_DESCRIPTION,
-      },
-      {
-        name: "get_price_snapshot",
-        tool: getPriceSnapshot,
-        description: PRICE_SNAPSHOT_DESCRIPTION,
-      }
-    );
-  }
-
-  // ── Web Search (Tavily) ──
-  if (process.env.TAVILY_API_KEY) {
-    tools.push({
-      name: "web_search",
-      tool: webSearchTool,
-      description: WEB_SEARCH_DESCRIPTION,
-    });
-  }
-
-  return tools;
+export function getToolRegistry(model = "gemini-2.5-flash"): RegisteredTool[] {
+  return buildToolDefinitions(model).filter(isToolAvailable);
 }
 
 /**
  * Get just the tool instances for binding to the LLM.
- *
- * This is what the agent uses:
- *   const tools = getTools(model);
- *   const llmWithTools = llm.bindTools(tools);
- *
- * @param model - Model name
- * @returns Array of tool instances
  */
-export function getTools(model: string): StructuredToolInterface[] {
+export function getTools(model = "gemini-2.5-flash"): StructuredToolInterface[] {
   return getToolRegistry(model).map((t) => t.tool);
 }
 
 /**
  * Build the tool descriptions section for the system prompt.
- *
- * Formats each tool's rich description with a header.
- * This is injected into the system prompt so the LLM knows:
- * - What tools are available
- * - When to use each tool
- * - When NOT to use each tool
- *
- * @param model - Model name
- * @returns Formatted string with all tool descriptions
- *
- * @example Output:
- * ### web_search
- *
- * Search the web for current information...
- *
- * ### get_income_statements
- *
- * Fetch a company's income statements...
  */
-export function buildToolDescriptions(model: string): string {
+export function buildToolDescriptions(model = "gemini-2.5-flash"): string {
   const registry = getToolRegistry(model);
 
   if (registry.length === 0) {
-    return "No tools are currently available. Check your API key configuration.";
+    return "No tools are currently available. Check your API key configuration in .env";
   }
 
-  return registry.map((t) => `### ${t.name}\n\n${t.description}`).join("\n\n");
+  // Group tools by category
+  const byCategory = new Map<ToolCategory, RegisteredTool[]>();
+  for (const tool of registry) {
+    const existing = byCategory.get(tool.category) || [];
+    existing.push(tool);
+    byCategory.set(tool.category, existing);
+  }
+
+  const categoryMeta: Record<ToolCategory, string> = {
+    META: "Intelligent routing — use these first",
+    MARKET_DATA: "Real-time and historical price data",
+    FUNDAMENTALS: "Company financial statements",
+    METRICS: "Financial ratios and analyst estimates",
+    INTELLIGENCE: "News, insider trades, revenue segments",
+    CRYPTO: "Cryptocurrency price data",
+    RESEARCH: "Web search and external information",
+  };
+
+  const categoryOrder: ToolCategory[] = [
+    "META",
+    "MARKET_DATA",
+    "FUNDAMENTALS",
+    "METRICS",
+    "INTELLIGENCE",
+    "CRYPTO",
+    "RESEARCH",
+  ];
+
+  const sections: string[] = [];
+
+  for (const category of categoryOrder) {
+    const tools = byCategory.get(category);
+    if (!tools || tools.length === 0) continue;
+
+    let section = `## ${category}\n_${categoryMeta[category]}_\n`;
+
+    for (const tool of tools) {
+      section += `\n### ${tool.name}\n`;
+      section += `${tool.shortDescription}\n`;
+      section += `**Use when:** ${tool.whenToUse.join("; ")}\n`;
+      if (tool.whenNotToUse && tool.whenNotToUse.length > 0) {
+        section += `**Don't use when:** ${tool.whenNotToUse.join("; ")}\n`;
+      }
+    }
+
+    sections.push(section);
+  }
+
+  return sections.join("\n");
+}
+
+/**
+ * Get a summary of available tools for logging/debugging.
+ */
+export function getToolSummary(model = "gemini-2.5-flash"): string {
+  const registry = getToolRegistry(model);
+  const definitions = buildToolDefinitions(model);
+  const available = registry.map((t) => t.name).join(", ");
+  const missing = definitions
+    .filter((t) => !isToolAvailable(t))
+    .map((t) => `${t.name} (needs ${t.requiresApiKey})`)
+    .join(", ");
+
+  let summary = `Available tools (${registry.length}): ${available || "none"}`;
+  if (missing) {
+    summary += `\nMissing tools: ${missing}`;
+  }
+  return summary;
 }
