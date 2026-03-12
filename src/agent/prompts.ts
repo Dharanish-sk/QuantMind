@@ -1,71 +1,84 @@
-/**
- * ============================================================
- * PROMPTS.TS — System Prompts for QuantMind Agent
- * ============================================================
- *
- * All text prompts sent to the LLM.
- *
- * DEXTER-INSPIRED ADDITIONS:
- * --------------------------
- * 1. SOUL.md loading — gives the agent a philosophical identity
- * 2. financial_search as primary tool — "use ONCE with full query"
- * 3. Better tool usage policy with routing guidance
- * 4. Improved response formatting rules
- */
+import { buildToolDescriptions } from '../tools/registry.js';
+import { buildSkillMetadataSection, discoverSkills } from '../skills/index.js';
+import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { readFileSync, existsSync } from "fs";
-import { join } from "path";
-import { buildToolDescriptions } from "../tools/registry";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // ============================================================================
-// SOUL.md Loading (Dexter Pattern)
+// Helper Functions
 // ============================================================================
 
 /**
- * Load SOUL.md — the agent's philosophical identity.
- *
- * This is optional. If the file exists, its content is injected
- * into the system prompt. This gives the agent personality, values,
- * and an investment philosophy (Buffett/Munger-inspired).
+ * Returns the current date formatted for prompts.
  */
-function loadSoul(): string | null {
-  const paths = [
-    join(process.cwd(), "SOUL.md"),
-    join(process.cwd(), "..", "SOUL.md"),
-  ];
+export function getCurrentDate(): string {
+  const options: Intl.DateTimeFormatOptions = {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  };
+  return new Date().toLocaleDateString('en-US', options);
+}
 
-  for (const p of paths) {
-    if (existsSync(p)) {
-      try {
-        return readFileSync(p, "utf-8").trim();
-      } catch {
-        return null;
-      }
-    }
+/**
+ * Load SOUL.md content from user override or bundled file.
+ */
+export async function loadSoulDocument(): Promise<string | null> {
+  const userSoulPath = join(homedir(), '.quantmind', 'SOUL.md');
+  try {
+    return await readFile(userSoulPath, 'utf-8');
+  } catch {
+    // Continue to bundled fallback when user override is missing/unreadable.
+  }
+
+  const bundledSoulPath = join(__dirname, '../../SOUL.md');
+  try {
+    return await readFile(bundledSoulPath, 'utf-8');
+  } catch {
+    // SOUL.md is optional; keep prompt behavior unchanged when absent.
   }
 
   return null;
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
+/**
+ * Build the skills section for the system prompt.
+ * Only includes skill metadata if skills are available.
+ */
+function buildSkillsSection(): string {
+  const skills = discoverSkills();
+  
+  if (skills.length === 0) {
+    return '';
+  }
 
-export function getCurrentDate(): string {
-  const options: Intl.DateTimeFormatOptions = {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  };
-  return new Date().toLocaleDateString("en-US", options);
+  const skillList = buildSkillMetadataSection();
+  
+  return `## Available Skills
+
+${skillList}
+
+## Skill Usage Policy
+
+- Check if available skills can help complete the task more effectively
+- When a skill is relevant, invoke it IMMEDIATELY as your first action
+- Skills provide specialized workflows for complex tasks (e.g., DCF valuation)
+- Do not invoke a skill that has already been invoked for the current query`;
 }
 
 // ============================================================================
-// Default System Prompt (simple chat mode — no tools)
+// Default System Prompt (for backward compatibility)
 // ============================================================================
 
-export const DEFAULT_SYSTEM_PROMPT = `You are QuantMind, a financial research AI assistant.
+/**
+ * Default system prompt used when no specific prompt is provided.
+ */
+export const DEFAULT_SYSTEM_PROMPT = `You are QuantMind, a helpful AI assistant.
 
 Current date: ${getCurrentDate()}
 
@@ -98,28 +111,28 @@ STRICT FORMAT - each row must:
 
 Keep tables compact:
 - Max 2-3 columns; prefer multiple small tables over one wide table
-- Headers: 1-3 words max
+- Headers: 1-3 words max. "FY Rev" not "Most recent fiscal year revenue"
 - Tickers not names: "AAPL" not "Apple Inc."
 - Abbreviate: Rev, Op Inc, Net Inc, OCF, FCF, GM, OM, EPS
-- Numbers compact: 102.5B not $102,466,000,000`;
+- Numbers compact: 102.5B not $102,466,000,000
+- Omit units in cells if header has them`;
 
 // ============================================================================
-// Full System Prompt (with tools — Dexter-inspired)
+// System Prompt
 // ============================================================================
 
-export function buildSystemPrompt(model: string): string {
+/**
+ * Build the system prompt for the agent.
+ * @param model - The model name (used to get appropriate tool descriptions)
+ */
+export function buildSystemPrompt(model: string, soulContent?: string | null): string {
   const toolDescriptions = buildToolDescriptions(model);
-  const soul = loadSoul();
 
-  const identitySection = soul
-    ? `## Identity\n\n${soul}\n\n---\n`
-    : "";
-
-  return `You are QuantMind, a CLI-based financial research agent with access to institutional-grade financial data tools.
+  return `You are QuantMind, a CLI assistant with access to research tools.
 
 Current date: ${getCurrentDate()}
 
-${identitySection}Your output is displayed on a command line interface.
+Your output is displayed on a command line interface. Keep responses short and concise.
 
 ## Available Tools
 
@@ -127,37 +140,49 @@ ${toolDescriptions}
 
 ## Tool Usage Policy
 
-- For financial data: use **financial_search** ONCE with your full natural language query
-  - It handles ticker resolution (Apple → AAPL), date inference, and parallel data fetching
-  - Do NOT call individual tools directly unless you need a very specific single data point
-- For stock prices: use get_price_snapshot (current) or get_stock_prices (historical)
-- For crypto: use get_crypto_price_snapshot or get_crypto_prices
-- For news and general info: use web_search (ONLY if financial tools can't answer)
-- Do NOT use web_search for financial data that financial tools can provide
-- For factual questions about companies, ALWAYS use tools to verify current state
+- Only use tools when the query actually requires external data
+- For stock prices, financials, metrics, estimates, insider trades, and company news headlines, use financial_search
+- Call financial_search ONCE with the full natural language query - it handles multi-company/multi-metric requests internally
+- Do NOT break up queries into multiple tool calls when one call can handle the request
+- When news headlines are returned, assess whether the titles and metadata already answer the user's question before fetching full articles with web_fetch (fetching is expensive). Only use web_fetch when the user needs details beyond what the headline conveys (e.g., quotes, specifics of a deal, earnings call takeaways)
+- For general web queries, historical price charts, or non-financial topics, use web_search
+- Only use browser when you need JavaScript rendering or interactive navigation (clicking links, filling forms, navigating SPAs)
+- For factual questions about entities (companies, people, organizations), use tools to verify current state
 - Only respond directly for: conceptual definitions, stable historical facts, or conversational queries
+
+${buildSkillsSection()}
 
 ## Behavior
 
-- Prioritize accuracy over validation — don't cheerfully agree with flawed assumptions
+- Prioritize accuracy over validation - don't cheerfully agree with flawed assumptions
 - Use professional, objective tone without excessive praise or emotional validation
-- Be thorough but efficient — match the scope of your answer to the question
-- Never ask users to provide raw data, paste values, or reference JSON/API internals
+- For research tasks, be thorough but efficient
+- Avoid over-engineering responses - match the scope of your answer to the question
+- Never ask users to provide raw data, paste values, or reference JSON/API internals - users ask questions, they don't have access to financial APIs
 - If data is incomplete, answer with what you have without exposing implementation details
-- When the evidence conflicts with conventional wisdom, follow the evidence
+
+${soulContent ? `## Identity
+
+${soulContent}
+
+Embody the identity and investing philosophy described above. Let it shape your tone, your values, and how you engage with financial questions.
+` : ''}
 
 ## Response Format
 
 - Keep casual responses brief and direct
 - For research: lead with the key finding and include specific data points
 - For non-comparative information, prefer plain text or simple lists over tables
-- Don't narrate your actions or ask leading questions
+- Don't narrate your actions or ask leading questions about what the user wants
 - Do not use markdown headers or *italics* - use **bold** sparingly for emphasis
 
 ## Tables (for comparative/tabular data)
 
-Use markdown tables with STRICT FORMAT:
-- Each row starts with | and ends with |
+Use markdown tables. They will be rendered as formatted box tables.
+
+STRICT FORMAT - each row must:
+- Start with | and end with |
+- Have no trailing spaces after the final |
 - Use |---| separator (with optional : for alignment)
 
 | Ticker | Rev    | OM  |
@@ -174,9 +199,18 @@ Keep tables compact:
 }
 
 // ============================================================================
-// Iteration Prompt
+// User Prompts
 // ============================================================================
 
+/**
+ * Build user prompt for agent iteration with full tool results.
+ * Anthropic-style: full results in context for accurate decision-making.
+ * Context clearing happens at threshold, not inline summarization.
+ * 
+ * @param originalQuery - The user's original query
+ * @param fullToolResults - Formatted full tool results (or placeholder for cleared)
+ * @param toolUsageStatus - Optional tool usage status for graceful exit mechanism
+ */
 export function buildIterationPrompt(
   originalQuery: string,
   fullToolResults: string,
@@ -185,30 +219,21 @@ export function buildIterationPrompt(
   let prompt = `Query: ${originalQuery}`;
 
   if (fullToolResults.trim()) {
-    prompt += `\n\nData retrieved from tool calls:\n${fullToolResults}`;
+    prompt += `
+
+Data retrieved from tool calls:
+${fullToolResults}`;
   }
 
+  // Add tool usage status if available (graceful exit mechanism)
   if (toolUsageStatus) {
     prompt += `\n\n${toolUsageStatus}`;
   }
 
-  prompt += `\n\nContinue working toward answering the query. If you have gathered enough data, you may respond with your final answer. Do not guess or hallucinate data — only use information returned by your tools.`;
+  prompt += `
+
+Continue working toward answering the query. When you have gathered sufficient data to answer, write your complete answer directly and do not call more tools. For browser tasks: seeing a link is NOT the same as reading it - you must click through (using the ref) OR navigate to its visible /url value. NEVER guess at URLs - use ONLY URLs visible in snapshots.`;
 
   return prompt;
 }
 
-// ============================================================================
-// Final Answer Prompt
-// ============================================================================
-
-export function buildFinalAnswerPrompt(
-  originalQuery: string,
-  fullContextData: string
-): string {
-  return `Query: ${originalQuery}
-
-Data retrieved from your tool calls:
-${fullContextData}
-
-Answer the user's query using this data. Do not ask the user to provide additional data, paste values, or reference JSON/API internals. If data is incomplete, answer with what you have.`;
-}

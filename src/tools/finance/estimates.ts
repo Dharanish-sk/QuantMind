@@ -1,40 +1,31 @@
-/**
- * ============================================================
- * ANALYST ESTIMATES TOOL (Financial Datasets API)
- * ============================================================
- *
- * Retrieves consensus analyst estimates for a company.
- * Useful for understanding market expectations and valuation analysis.
- */
+import { DynamicStructuredTool } from '@langchain/core/tools';
+import { z } from 'zod';
+import { callApi } from './api.js';
+import { formatToolResult } from '../types.js';
 
-import { DynamicStructuredTool } from "@langchain/core/tools";
-import { z } from "zod";
-import { callApi } from "./api";
-import { formatToolResult } from "../types";
+const AnalystEstimatesInputSchema = z.object({
+  ticker: z
+    .string()
+    .describe(
+      "The stock ticker symbol to fetch analyst estimates for. For example, 'AAPL' for Apple."
+    ),
+  period: z
+    .enum(['annual', 'quarterly'])
+    .default('annual')
+    .describe("The period for the estimates, either 'annual' or 'quarterly'."),
+});
 
 export const getAnalystEstimates = new DynamicStructuredTool({
-  name: "get_analyst_estimates",
-
-  description:
-    "Retrieves analyst estimates for a company, including estimated EPS, revenue, and growth. " +
-    "Useful for understanding consensus expectations and performing valuation analysis.",
-
-  schema: z.object({
-    ticker: z
-      .string()
-      .describe("The stock ticker symbol (e.g., 'AAPL' for Apple)."),
-    period: z
-      .enum(["annual", "quarterly"])
-      .default("annual")
-      .describe("The period for estimates: 'annual' or 'quarterly'."),
-  }),
-
+  name: 'get_analyst_estimates',
+  description: `Retrieves analyst estimates for a given company ticker, including metrics like estimated EPS. Useful for understanding consensus expectations, assessing future growth prospects, and performing valuation analysis.`,
+  schema: AnalystEstimatesInputSchema,
   func: async (input) => {
     const params = {
-      ticker: input.ticker.trim().toUpperCase(),
+      ticker: input.ticker,
       period: input.period,
     };
-    const { data, url } = await callApi("/analyst-estimates/", params);
+    const { data, url } = await callApi('/analyst-estimates/', params);
     return formatToolResult(data.analyst_estimates || [], [url]);
   },
 });
+

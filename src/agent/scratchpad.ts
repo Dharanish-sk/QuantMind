@@ -1,38 +1,9 @@
-/**
- * =========================
- * Scratchpad - The Agent's Lab Notebook
- * =========================
- *
- * Every time a user asks a question, the agent creates a Scratchpad.
- * It records EVERYTHING the agent does:
- *   - The original query
- *   - Every tool call (name, args, result, summary)
- *   - Every thinking step
- *
- * WHY:
- *   1. Debugging - you can open the JSONL file and see exactly what happened
- *   2. Final answer - the agent reads back its work to write a comprehensive answer
- *   3. Tool limits - tracks how many times each tool was called to prevent loops
- *
- * HOW:
- *   - Append-only JSONL (newline-delimited JSON)
- *   - Each line is a valid JSON object
- *   - If the app crashes mid-write, all previous lines are safe
- *   - Files stored in .quantmind/scratchpad/
- */
-
-import { existsSync, mkdirSync, appendFileSync, readFileSync } from "fs";
-import { join } from "path";
-import { createHash } from "crypto";
-
-// ============================================================================
-// Interfaces
-// ============================================================================
+import { existsSync, mkdirSync, appendFileSync, readFileSync } from 'fs';
+import { join } from 'path';
+import { createHash } from 'crypto';
 
 /**
- * Simplified record of a tool call.
- * Used in DoneEvent to tell the UI what tools were called.
- * Doesn't include the LLM summary - just the raw data.
+ * Record of a tool call for external consumers (e.g., DoneEvent)
  */
 export interface ToolCallRecord {
   tool: string;
@@ -40,68 +11,29 @@ export interface ToolCallRecord {
   result: string;
 }
 
-/**
- * Full context for final answer generation.
- * When the agent is ready to answer, it loads ALL tool results
- * with full data (not just summaries) to give the LLM maximum context.
- */
-export interface ToolContext {
-  toolName: string;
-  args: Record<string, unknown>;
-  result: string;
-}
-
-/**
- * ToolContext + LLM summary + index.
- * Used when context exceeds token budget.
- * The LLM picks which results need full data vs just summaries.
- * The index lets the LLM reference specific results: "I need [0] and [3]"
- */
-export interface ToolContextWithSummary extends ToolContext {
-  llmSummary: string;
-  index: number;
-}
-
-/**
- * One line in the JSONL file.
- * Each entry has a type that tells you what happened:
- *   - "init": the query that started this scratchpad
- *   - "tool_result": a tool was called and returned data
- *   - "thinking": the agent reasoned about something
- */
 export interface ScratchpadEntry {
-  type: "init" | "tool_result" | "thinking";
+  type: 'init' | 'tool_result' | 'thinking';
   timestamp: string;
-
-  // For init and thinking entries:
+  // For init/thinking:
   content?: string;
-
-  // For tool_result entries:
+  // For tool_result:
   toolName?: string;
   args?: Record<string, unknown>;
-  result?: unknown; // Stored as parsed JSON object when possible, string otherwise
-  llmSummary?: string;
+  result?: unknown; // Stored as parsed object when possible, string otherwise
 }
 
 /**
- * Configuration for tool call limits.
- * These are SOFT limits - we warn but never block.
- *
- * maxCallsPerTool: How many times can one tool be called per query?
- *   - Default 3. After 3 calls to the same tool, the agent gets a warning.
- *
- * similarityThreshold: How similar must two queries be to trigger a warning?
- *   - Default 0.7 (70% word overlap). Prevents the agent from retrying
- *     the same query with slightly different wording.
+ * Tool call limit configuration
  */
 export interface ToolLimitConfig {
+  /** Max calls per tool per query (default: 3) */
   maxCallsPerTool: number;
+  /** Query similarity threshold (0-1, default: 0.7) */
   similarityThreshold: number;
 }
 
 /**
- * Status of how much a tool has been used.
- * Injected into prompts so the LLM knows its limits.
+ * Status of tool usage for graceful exit mechanism
  */
 export interface ToolUsageStatus {
   toolName: string;
@@ -109,356 +41,142 @@ export interface ToolUsageStatus {
   maxCalls: number;
   remainingCalls: number;
   recentQueries: string[];
-  isBlocked: boolean; // Always false - we warn, never block
+  isBlocked: boolean;
   blockReason?: string;
 }
 
-// ============================================================================
-// Defaults
-// ============================================================================
-
+/** Default tool limit configuration */
 const DEFAULT_LIMIT_CONFIG: ToolLimitConfig = {
   maxCallsPerTool: 3,
   similarityThreshold: 0.7,
 };
 
-// ============================================================================
-// Scratchpad Class
-// ============================================================================
-
+/**
+ * Append-only scratchpad for tracking agent work on a query.
+ * Uses JSONL format (newline-delimited JSON) for resilient appending.
+ * Files are persisted in .quantmind/scratchpad/ for debugging/history.
+ * 
+ * This is the single source of truth for all agent work on a query.
+ * 
+ * Includes soft limit warnings to guide the LLM:
+ * - Tool call counting with suggested limits (warnings, not blocks)
+ * - Query similarity detection to help prevent retry loops
+ */
 export class Scratchpad {
-  private readonly scratchpadDir = ".quantmind/scratchpad";
+  private readonly scratchpadDir = '.quantmind/scratchpad';
   private readonly filepath: string;
   private readonly limitConfig: ToolLimitConfig;
 
-  // In-memory tracking (also persisted in JSONL, but faster to check in memory)
-  //
-  // toolCallCounts: "financial_search" → 2 (called twice so far)
-  // toolQueries: "financial_search" → ["Apple revenue", "Tesla revenue"]
+  // In-memory tracking for tool limits (also persisted in JSONL)
   private toolCallCounts: Map<string, number> = new Map();
   private toolQueries: Map<string, string[]> = new Map();
 
-  /**
-   * Create a new scratchpad for a query.
-   *
-   * What happens:
-   * 1. Creates .quantmind/scratchpad/ directory if it doesn't exist
-   * 2. Generates a unique filename from timestamp + MD5 hash of the query
-   *    Example: "2026-02-11-153045_a1b2c3d4e5f6.jsonl"
-   * 3. Writes the first line: { type: "init", content: "user's query" }
-   */
+  // In-memory tracking for Anthropic-style context clearing (JSONL file untouched)
+  // Stores indices of tool_result entries that have been cleared from context
+  private clearedToolIndices: Set<number> = new Set();
+
   constructor(query: string, limitConfig?: Partial<ToolLimitConfig>) {
-    // Merge user config with defaults (user values override defaults)
     this.limitConfig = { ...DEFAULT_LIMIT_CONFIG, ...limitConfig };
 
-    // Create directory if it doesn't exist
-    // { recursive: true } means it creates parent dirs too (.quantmind/ and scratchpad/)
     if (!existsSync(this.scratchpadDir)) {
       mkdirSync(this.scratchpadDir, { recursive: true });
     }
 
-    // Generate unique filename:
-    // 1. Hash the query with MD5 → take first 12 chars
-    //    "What is Apple's revenue?" → "a1b2c3d4e5f6"
-    const hash = createHash("md5").update(query).digest("hex").slice(0, 12);
-
-    // 2. Format timestamp: "2026-02-11-153045"
+    const hash = createHash('md5').update(query).digest('hex').slice(0, 12);
     const now = new Date();
-    const timestamp = now
-      .toISOString()
-      .slice(0, 19) // "2026-02-11T15:30:45"
-      .replace("T", "-") // "2026-02-11-15:30:45"
-      .replace(/:/g, ""); // "2026-02-11-153045"
-
-    // 3. Combine: "2026-02-11-153045_a1b2c3d4e5f6.jsonl"
+    const timestamp = now.toISOString()
+      .slice(0, 19)           // "2026-01-21T15:30:45"
+      .replace('T', '-')      // "2026-01-21-15:30:45"
+      .replace(/:/g, '');     // "2026-01-21-153045"
     this.filepath = join(this.scratchpadDir, `${timestamp}_${hash}.jsonl`);
 
-    // Write the first entry
-    this.append({
-      type: "init",
-      content: query,
-      timestamp: new Date().toISOString(),
-    });
+    // Write initial entry with the query
+    this.append({ type: 'init', content: query, timestamp: new Date().toISOString() });
   }
 
-  // ============================================================================
-  // Writing Methods (append data to the JSONL file)
-  // ============================================================================
-
   /**
-   * Record a tool result.
-   * Called after a tool executes successfully.
-   *
-   * Stores both the full raw result AND the LLM summary.
-   * - Full result: used for final answer generation (maximum accuracy)
-   * - LLM summary: used during iterations (saves tokens)
+   * Add a complete tool result with full data.
+   * Parses JSON strings to store as objects for cleaner JSONL output.
+   * Anthropic-style: no inline summarization, full results preserved.
    */
   addToolResult(
     toolName: string,
     args: Record<string, unknown>,
-    result: string,
-    llmSummary?: string
+    result: string
   ): void {
     this.append({
-      type: "tool_result",
+      type: 'tool_result',
       timestamp: new Date().toISOString(),
       toolName,
       args,
       result: this.parseResultSafely(result),
-      llmSummary,
-    });
-  }
-
-  /**
-   * Record a thinking step.
-   * When the LLM outputs text alongside tool calls,
-   * that text is the agent's reasoning.
-   */
-  addThinking(thought: string): void {
-    this.append({
-      type: "thinking",
-      content: thought,
-      timestamp: new Date().toISOString(),
     });
   }
 
   // ============================================================================
-  // Reading Methods (read data back from the JSONL file)
+  // Tool Limit / Graceful Exit Methods
   // ============================================================================
 
   /**
-   * Get all LLM summaries for building the iteration prompt.
-   *
-   * During the agent loop, we don't send full tool results to the LLM
-   * (too many tokens). Instead we send these short summaries.
-   *
-   * Example return:
-   * [
-   *   "get_income_statements(AAPL) -> Apple revenue was $394B in FY2025",
-   *   "get_price_snapshot(AAPL) -> Apple stock is $228.50"
-   * ]
+   * Check if a tool call can proceed. Returns status with warning if limits exceeded.
+   * Call this BEFORE executing a tool to help prevent retry loops.
+   * Note: Always allows the call but provides warnings to guide the LLM.
    */
-  getToolSummaries(): string[] {
-    return this.readEntries()
-      .filter((e) => e.type === "tool_result" && e.llmSummary)
-      .map((e) => e.llmSummary!);
-  }
-
-  /**
-   * Get simplified tool call records for DoneEvent.
-   * The UI uses this to show what tools were called.
-   */
-  getToolCallRecords(): ToolCallRecord[] {
-    return this.readEntries()
-      .filter((e) => e.type === "tool_result" && e.toolName)
-      .map((e) => ({
-        tool: e.toolName!,
-        args: e.args!,
-        result: this.stringifyResult(e.result),
-      }));
-  }
-
-  /**
-   * Get full contexts for final answer generation.
-   * This is the FULL data - not summaries.
-   * Used when the agent is ready to write its final answer.
-   */
-  getFullContexts(): ToolContext[] {
-    return this.readEntries()
-      .filter((e) => e.type === "tool_result" && e.toolName && e.result)
-      .map((e) => ({
-        toolName: e.toolName!,
-        args: e.args!,
-        result: this.stringifyResult(e.result),
-      }));
-  }
-
-  /**
-   * Get full contexts WITH summaries AND indices.
-   * Used when context exceeds token budget.
-   * The LLM selects which results need full data by index.
-   */
-  getFullContextsWithSummaries(): ToolContextWithSummary[] {
-    return this.readEntries()
-      .filter((e) => e.type === "tool_result" && e.toolName && e.result)
-      .map((e, index) => ({
-        toolName: e.toolName!,
-        args: e.args!,
-        result: this.stringifyResult(e.result),
-        llmSummary: e.llmSummary || "",
-        index,
-      }));
-  }
-
-  /**
-   * Get ALL tool results as a single formatted string.
-   * Used in the iteration prompt — the LLM sees this during the agent loop.
-   *
-   * Returns something like:
-   *   "## get_price_snapshot({ticker: "AAPL"})
-   *    Result: {"price": 228.50, "change": "+1.2%"}
-   *
-   *    ## web_search({query: "Apple earnings"})
-   *    Result: Apple reported record earnings..."
-   */
-  getToolResults(): string {
-    return this.readEntries()
-      .filter((e) => e.type === "tool_result" && e.toolName)
-      .map((e) => {
-        const argsStr = JSON.stringify(e.args || {});
-        const resultStr = this.stringifyResult(e.result);
-        return `## ${e.toolName}(${argsStr})\nResult: ${resultStr}`;
-      })
-      .join("\n\n");
-  }
-
-  /**
-   * Clear the OLDEST tool results, keeping only the N most recent.
-   *
-   * WHY? During a long research session, tool results accumulate.
-   * If they exceed the context window, we need to trim.
-   *
-   * HOW IT WORKS:
-   *   1. Read all entries from JSONL
-   *   2. Separate tool_result entries from others (init, thinking)
-   *   3. If tool results exceed `keep`, remove the oldest ones
-   *   4. Re-write the JSONL file with remaining entries
-   *
-   * The removed data is NOT lost — it was already saved to disk.
-   * We can reload it later for the final answer using getFullContexts().
-   *
-   * NOTE: This rewrites the file (not append-only for this operation).
-   * This is the ONLY method that rewrites — all others append.
-   *
-   * @param keep - Number of most recent tool results to keep
-   * @returns Number of entries that were cleared
-   */
-  clearOldestToolResults(keep: number): number {
-    const allEntries = this.readEntries();
-
-    // Separate tool results from other entries
-    const toolResults = allEntries.filter((e) => e.type === "tool_result");
-    const otherEntries = allEntries.filter((e) => e.type !== "tool_result");
-
-    // If we have fewer tool results than the keep limit, nothing to clear
-    if (toolResults.length <= keep) return 0;
-
-    // Keep only the most recent `keep` tool results
-    const keptResults = toolResults.slice(-keep);
-    //                               ^^^^^^^^
-    // .slice(-5) = last 5 elements
-    // [a, b, c, d, e, f, g].slice(-5) → [c, d, e, f, g]
-
-    const clearedCount = toolResults.length - keptResults.length;
-
-    // Re-write file with: init + thinking + kept tool results
-    const remaining = [...otherEntries, ...keptResults];
-    const { writeFileSync } = require("fs");
-    writeFileSync(
-      this.filepath,
-      remaining.map((e) => JSON.stringify(e)).join("\n") + "\n"
-    );
-
-    return clearedCount;
-  }
-
-  /**
-   * Check if any tool results have been recorded.
-   * Used to decide: should we generate a final answer with context,
-   * or just return the LLM's direct response?
-   */
-  hasToolResults(): boolean {
-    return this.readEntries().some((e) => e.type === "tool_result");
-  }
-
-  /**
-   * Check if a skill has already been executed.
-   * Each skill should only run once per query (deduplication).
-   */
-  hasExecutedSkill(skillName: string): boolean {
-    return this.readEntries().some(
-      (e) =>
-        e.type === "tool_result" &&
-        e.toolName === "skill" &&
-        e.args?.skill === skillName
-    );
-  }
-
-  // ============================================================================
-  // Tool Limit Methods (prevent infinite loops)
-  // ============================================================================
-
-  /**
-   * Check if a tool call should proceed.
-   * Returns { allowed: true } always (we never block).
-   * But includes a WARNING message if:
-   *   1. Tool has been called too many times
-   *   2. Query is too similar to a previous call
-   *   3. Approaching the limit (1 call remaining)
-   *
-   * The warning is injected into the prompt so the LLM sees it
-   * and hopefully changes its approach.
-   */
-  canCallTool(
-    toolName: string,
-    query?: string
-  ): { allowed: boolean; warning?: string } {
+  canCallTool(toolName: string, query?: string): { allowed: boolean; warning?: string } {
     const currentCount = this.toolCallCounts.get(toolName) ?? 0;
     const maxCalls = this.limitConfig.maxCallsPerTool;
 
-    // Over the limit - warn with suggestions
+    // Check if over the suggested limit - warn but allow
     if (currentCount >= maxCalls) {
       return {
         allowed: true,
-        warning:
-          `Tool '${toolName}' has been called ${currentCount} times (suggested limit: ${maxCalls}). ` +
-          `Consider: (1) trying a different tool, (2) using different search terms, or ` +
-          `(3) proceeding with what you have.`,
+        warning: `Tool '${toolName}' has been called ${currentCount} times (suggested limit: ${maxCalls}). ` +
+          `If previous calls didn't return the needed data, consider: ` +
+          `(1) trying a different tool, (2) using different search terms, or ` +
+          `(3) proceeding with what you have and noting any data gaps to the user.`,
       };
     }
 
-    // Check if this query is too similar to a previous one
+    // Check query similarity if query provided
     if (query) {
       const previousQueries = this.toolQueries.get(toolName) ?? [];
       const similarQuery = this.findSimilarQuery(query, previousQueries);
-
+      
       if (similarQuery) {
+        // Allow but warn - the LLM should know it's repeating
         const remaining = maxCalls - currentCount;
         return {
           allowed: true,
-          warning:
-            `This query is very similar to a previous '${toolName}' call. ` +
-            `You have ${remaining} attempt(s) remaining. ` +
-            `Consider trying a different approach.`,
+          warning: `This query is very similar to a previous '${toolName}' call. ` +
+            `You have ${remaining} attempt(s) before reaching the suggested limit. ` +
+            `If the tool isn't returning useful results, consider: ` +
+            `(1) trying a different tool, (2) using different search terms, or ` +
+            `(3) acknowledging the data limitation to the user.`,
         };
       }
     }
 
-    // Approaching limit (1 call remaining)
+    // Check if approaching limit (1 call remaining)
     if (currentCount === maxCalls - 1) {
       return {
         allowed: true,
-        warning:
-          `Approaching limit for '${toolName}' (${currentCount + 1}/${maxCalls}). ` +
-          `Make this call count.`,
+        warning: `You are approaching the suggested limit for '${toolName}' (${currentCount + 1}/${maxCalls}). ` +
+          `If this doesn't return the needed data, consider trying a different approach.`,
       };
     }
 
-    // All good, no warning
     return { allowed: true };
   }
 
   /**
-   * Record that a tool was called.
-   * Call this AFTER the tool executes (success or failure).
-   * Increments the counter and stores the query for similarity checking.
+   * Record a tool call attempt. Call this AFTER the tool executes successfully.
    */
   recordToolCall(toolName: string, query?: string): void {
-    // Increment call count
+    // Update call count
     const currentCount = this.toolCallCounts.get(toolName) ?? 0;
     this.toolCallCounts.set(toolName, currentCount + 1);
 
-    // Track the query text
+    // Track query if provided
     if (query) {
       const queries = this.toolQueries.get(toolName) ?? [];
       queries.push(query);
@@ -467,200 +185,280 @@ export class Scratchpad {
   }
 
   /**
-   * Get usage status for all tools.
-   * Formatted for injection into prompts.
+   * Get usage status for all tools that have been called.
+   * Used to inject tool attempt status into prompts.
    */
   getToolUsageStatus(): ToolUsageStatus[] {
     const statuses: ToolUsageStatus[] = [];
-
+    
     for (const [toolName, callCount] of this.toolCallCounts) {
       const maxCalls = this.limitConfig.maxCallsPerTool;
       const remainingCalls = Math.max(0, maxCalls - callCount);
       const recentQueries = this.toolQueries.get(toolName) ?? [];
-
+      const overLimit = callCount >= maxCalls;
+      
       statuses.push({
         toolName,
         callCount,
         maxCalls,
         remainingCalls,
-        recentQueries: recentQueries.slice(-3), // Last 3 queries only
-        isBlocked: false, // Never block
-        blockReason:
-          callCount >= maxCalls
-            ? `Over suggested limit of ${maxCalls} calls`
-            : undefined,
+        recentQueries: recentQueries.slice(-3), // Last 3 queries
+        isBlocked: false, // Never block, just warn
+        blockReason: overLimit ? `Over suggested limit of ${maxCalls} calls` : undefined,
       });
     }
-
+    
     return statuses;
   }
 
   /**
-   * Format tool usage as a string for prompt injection.
-   * Returns null if no tools have been called yet.
-   *
-   * Example output:
-   *   ## Tool Usage This Query
-   *   - financial_search: 2/3 calls
-   *   - web_search: 1/3 calls
+   * Format tool usage status for injection into prompts.
    */
   formatToolUsageForPrompt(): string | null {
     const statuses = this.getToolUsageStatus();
-    if (statuses.length === 0) return null;
+    
+    if (statuses.length === 0) {
+      return null;
+    }
 
-    const lines = statuses.map((s) => {
-      const status =
-        s.callCount >= s.maxCalls
-          ? `${s.callCount} calls (over suggested limit of ${s.maxCalls})`
-          : `${s.callCount}/${s.maxCalls} calls`;
+    const lines = statuses.map(s => {
+      const status = s.callCount >= s.maxCalls
+        ? `${s.callCount} calls (over suggested limit of ${s.maxCalls})`
+        : `${s.callCount}/${s.maxCalls} calls`;
       return `- ${s.toolName}: ${status}`;
     });
 
-    return (
-      `## Tool Usage This Query\n\n${lines.join("\n")}\n\n` +
-      `Note: If a tool isn't returning useful results, try a different approach.`
-    );
+    return `## Tool Usage This Query\n\n${lines.join('\n')}\n\n` +
+      `Note: If a tool isn't returning useful results after several attempts, consider trying a different tool/approach.`;
   }
 
-  // ============================================================================
-  // Similarity Detection (prevents retry loops)
-  // ============================================================================
-
   /**
-   * Find a previous query that is too similar to the new one.
-   *
-   * Uses Jaccard similarity: intersection / union of word sets.
-   *
-   * Example:
-   *   "Apple revenue 2024" vs "Apple revenue 2025"
-   *   Words: {apple, revenue, 2024} vs {apple, revenue, 2025}
-   *   Intersection: {apple, revenue} = 2
-   *   Union: {apple, revenue, 2024, 2025} = 4
-   *   Similarity: 2/4 = 0.5 → below 0.7 threshold → OK, not similar
-   *
-   *   "Apple revenue" vs "Apple revenue data"
-   *   Words: {apple, revenue} vs {apple, revenue, data}
-   *   Intersection: {apple, revenue} = 2
-   *   Union: {apple, revenue, data} = 3
-   *   Similarity: 2/3 = 0.67 → below 0.7 → OK
-   *
-   *   "Apple revenue" vs "Apple revenue"
-   *   Similarity: 1.0 → above 0.7 → WARNING!
+   * Check if a query is too similar to previous queries.
+   * Uses word overlap similarity (Jaccard-like).
    */
-  private findSimilarQuery(
-    newQuery: string,
-    previousQueries: string[]
-  ): string | null {
+  private findSimilarQuery(newQuery: string, previousQueries: string[]): string | null {
     const newWords = this.tokenize(newQuery);
-
+    
     for (const prevQuery of previousQueries) {
       const prevWords = this.tokenize(prevQuery);
       const similarity = this.calculateSimilarity(newWords, prevWords);
-
+      
       if (similarity >= this.limitConfig.similarityThreshold) {
-        return prevQuery; // Found a match!
+        return prevQuery;
       }
     }
-
-    return null; // No similar queries found
+    
+    return null;
   }
 
   /**
-   * Tokenize a query into normalized words.
-   *
-   * "What is Apple's revenue?" → Set { "what", "apple", "revenue" }
-   *
-   * Steps:
-   * 1. Lowercase everything
-   * 2. Replace punctuation with spaces
-   * 3. Split on whitespace
-   * 4. Filter out tiny words (length ≤ 2) like "is", "a", "in"
-   * 5. Put into a Set (removes duplicates)
+   * Tokenize a query into normalized words for similarity comparison.
    */
   private tokenize(query: string): Set<string> {
     return new Set(
       query
         .toLowerCase()
-        .replace(/[^\w\s]/g, " ") // "apple's" → "apple s"
-        .split(/\s+/) // Split on spaces
-        .filter((w) => w.length > 2) // Remove "is", "a", "in", etc.
+        .replace(/[^\w\s]/g, ' ')
+        .split(/\s+/)
+        .filter(w => w.length > 2) // Skip very short words
     );
   }
 
   /**
-   * Calculate Jaccard similarity between two word sets.
-   *
-   * Jaccard = |intersection| / |union|
-   *
-   * Returns 0 to 1:
-   *   0 = completely different
-   *   1 = identical
+   * Calculate word overlap similarity between two word sets.
    */
   private calculateSimilarity(set1: Set<string>, set2: Set<string>): number {
     if (set1.size === 0 || set2.size === 0) return 0;
-
-    // Count words that appear in BOTH sets
-    const intersection = [...set1].filter((w) => set2.has(w)).length;
-
-    // Count ALL unique words across both sets
+    
+    const intersection = [...set1].filter(w => set2.has(w)).length;
     const union = new Set([...set1, ...set2]).size;
-
-    return intersection / union;
+    
+    return intersection / union; // Jaccard similarity
   }
 
-  // ============================================================================
-  // Private Helpers
-  // ============================================================================
-
   /**
-   * Try to parse a string as JSON.
-   * If it's valid JSON, store as an object (cleaner in JSONL output).
-   * If not (error messages, plain text), store as-is.
+   * Safely parse a result string as JSON if possible.
+   * Returns the parsed object if valid JSON, otherwise returns the original string.
    */
   private parseResultSafely(result: string): unknown {
     try {
       return JSON.parse(result);
     } catch {
+      // Not valid JSON, return as-is (e.g., error messages, plain text)
       return result;
     }
   }
 
   /**
-   * Convert a stored result back to a string.
-   * If it was stored as an object, JSON.stringify it.
-   * If it was stored as a string, return as-is.
+   * Append thinking/reasoning
+   */
+  addThinking(thought: string): void {
+    this.append({ type: 'thinking', content: thought, timestamp: new Date().toISOString() });
+  }
+
+  /**
+   * Get full tool results formatted for the iteration prompt.
+   * Anthropic-style: full results in context, excluding cleared entries.
+   * Does NOT modify the JSONL file - clearing is in-memory only.
+   */
+  getToolResults(): string {
+    const entries = this.readEntries();
+    let toolResultIndex = 0;
+    
+    const formattedResults: string[] = [];
+    for (const entry of entries) {
+      if (entry.type !== 'tool_result' || !entry.toolName) continue;
+      
+      // Skip entries that have been cleared from context (in-memory only)
+      if (this.clearedToolIndices.has(toolResultIndex)) {
+        formattedResults.push(`[Tool result #${toolResultIndex + 1} cleared from context]`);
+        toolResultIndex++;
+        continue;
+      }
+      
+      const argsStr = entry.args 
+        ? Object.entries(entry.args).map(([k, v]) => `${k}=${v}`).join(', ')
+        : '';
+      const resultStr = this.stringifyResult(entry.result);
+      formattedResults.push(`### ${entry.toolName}(${argsStr})\n${resultStr}`);
+      toolResultIndex++;
+    }
+    
+    return formattedResults.join('\n\n');
+  }
+
+  /**
+   * Clear oldest tool results from context (in-memory only).
+   * Anthropic-style: removes oldest tool results, keeping most recent N.
+   * The JSONL file is NOT modified - this only affects what gets sent to the LLM.
+   * 
+   * @param keepCount - Number of most recent tool results to keep
+   * @returns Number of tool results that were cleared
+   */
+  clearOldestToolResults(keepCount: number): number {
+    const entries = this.readEntries();
+    const toolResultIndices: number[] = [];
+    
+    let index = 0;
+    for (const entry of entries) {
+      if (entry.type === 'tool_result') {
+        // Only consider entries not already cleared
+        if (!this.clearedToolIndices.has(index)) {
+          toolResultIndices.push(index);
+        }
+        index++;
+      }
+    }
+    
+    // Calculate how many to clear
+    const toClearCount = Math.max(0, toolResultIndices.length - keepCount);
+    
+    if (toClearCount === 0) return 0;
+    
+    // Clear oldest entries (first N indices)
+    for (let i = 0; i < toClearCount; i++) {
+      this.clearedToolIndices.add(toolResultIndices[i]);
+    }
+    
+    return toClearCount;
+  }
+
+  /**
+   * Get count of active (non-cleared) tool results.
+   */
+  getActiveToolResultCount(): number {
+    const entries = this.readEntries();
+    let count = 0;
+    let index = 0;
+    
+    for (const entry of entries) {
+      if (entry.type === 'tool_result') {
+        if (!this.clearedToolIndices.has(index)) {
+          count++;
+        }
+        index++;
+      }
+    }
+    
+    return count;
+  }
+
+  /**
+   * Get tool call records for DoneEvent (external consumers)
+   */
+  getToolCallRecords(): ToolCallRecord[] {
+    return this.readEntries()
+      .filter(e => e.type === 'tool_result' && e.toolName)
+      .map(e => ({
+        tool: e.toolName!,
+        args: e.args!,
+        result: this.stringifyResult(e.result),
+      }));
+  }
+
+  /**
+   * Convert a result back to string for API compatibility.
+   * If already a string, returns as-is. Otherwise JSON stringifies.
    */
   private stringifyResult(result: unknown): string {
-    if (typeof result === "string") return result;
+    if (typeof result === 'string') {
+      return result;
+    }
     return JSON.stringify(result);
   }
 
   /**
-   * Append one entry to the JSONL file.
-   * Each call writes exactly one line.
-   *
-   * appendFileSync is used because:
-   * 1. It's synchronous (simple, no race conditions)
-   * 2. It APPENDS (doesn't overwrite previous lines)
-   * 3. If the app crashes, all previous lines are safe
+   * Check if any tool results have been recorded
    */
-  private append(entry: ScratchpadEntry): void {
-    appendFileSync(this.filepath, JSON.stringify(entry) + "\n");
+  hasToolResults(): boolean {
+    return this.readEntries().some(e => e.type === 'tool_result');
   }
 
   /**
-   * Read all entries from the JSONL file.
-   * Parses each line as JSON.
-   *
-   * This is called frequently during a query to read back results.
-   * For a production app, you'd cache this. For learning, this is fine.
+   * Check if a skill has already been executed in this query.
+   * Used for deduplication - each skill should only run once per query.
+   */
+  hasExecutedSkill(skillName: string): boolean {
+    return this.readEntries().some(
+      e => e.type === 'tool_result' && e.toolName === 'skill' && e.args?.skill === skillName
+    );
+  }
+
+  /**
+   * Append-only write
+   */
+  private append(entry: ScratchpadEntry): void {
+    appendFileSync(this.filepath, JSON.stringify(entry) + '\n');
+  }
+
+  /**
+   * Parse and validate a single JSONL line. Returns null for malformed or invalid entries.
+   */
+  private parseLine(line: string): ScratchpadEntry | null {
+    try {
+      const parsed = JSON.parse(line);
+      return parsed && typeof parsed === 'object' && 'type' in parsed && 'timestamp' in parsed
+        ? (parsed as ScratchpadEntry)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Read all entries from the log.
+   * Skips malformed or corrupt lines (partial writes, disk corruption) to avoid
+   * a single bad line crashing tool-context methods.
    */
   private readEntries(): ScratchpadEntry[] {
-    if (!existsSync(this.filepath)) return [];
+    if (!existsSync(this.filepath)) {
+      return [];
+    }
 
-    return readFileSync(this.filepath, "utf-8")
-      .split("\n") // Split into lines
-      .filter((line) => line.trim()) // Remove empty lines
-      .map((line) => JSON.parse(line) as ScratchpadEntry); // Parse each line
+    return readFileSync(this.filepath, 'utf-8')
+      .split('\n')
+      .filter((line) => line.trim())
+      .map((line) => this.parseLine(line))
+      .filter((entry): entry is ScratchpadEntry => entry !== null);
   }
 }

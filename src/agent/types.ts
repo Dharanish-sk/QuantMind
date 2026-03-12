@@ -1,245 +1,131 @@
 /**
- * =========================
+ * User's response to a tool approval prompt.
+ * - 'allow-once': approve this single invocation
+ * - 'allow-session': approve all invocations of this tool for the rest of the session
+ * - 'deny': reject and immediately end the agent's turn
+ */
+export type ApprovalDecision = 'allow-once' | 'allow-session' | 'deny';
+
+/**
  * Agent configuration
- * =========================
- *
- * This interface defines ALL the knobs that control
- * how an agent runs, without changing agent logic.
- *
- * Think of this as:
- *  - runtime settings
- *  - safety limits
- *  - environment control
- *
- * The agent engine reads this config and adjusts its behavior.
  */
 export interface AgentConfig {
-  /**
-   * The LLM model name to use.
-   * Example:
-   *  - "gpt-5.2"
-   *  - "claude-sonnet-4-20250514"
-   *
-   * Keeping this here allows:
-   *  - model swapping without code changes
-   *  - A/B testing models
-   *  - environment-based configs (dev vs prod)
-   */
+  /** Model to use for LLM calls (e.g., 'gpt-5.2', 'claude-sonnet-4-20250514') */
   model?: string;
-
-  /**
-   * Which provider serves the model.
-   * This decouples the agent from a single vendor.
-   *
-   * Examples:
-   *  - "openai"
-   *  - "anthropic"
-   *  - "google"
-   *  - "ollama"
-   *
-   * The agent can route requests based on this.
-   */
+  /** Model provider (e.g., 'openai', 'anthropic', 'google', 'ollama') */
   modelProvider?: string;
-
-  /**
-   * Maximum number of reasoning / tool-use loops
-   * the agent is allowed to perform.
-   *
-   * Why this exists:
-   *  - prevents infinite loops
-   *  - controls cost
-   *  - bounds latency
-   *
-   * Typical agent flow:
-   *  think → tool → think → tool → answer
-   */
+  /** Maximum agent loop iterations (default: 10) */
   maxIterations?: number;
-
-  /**
-   * AbortSignal used to cancel agent execution.
-   *
-   * Very important for:
-   *  - user cancellation (Ctrl+C, Stop button)
-   *  - timeouts
-   *  - UI navigation changes
-   *
-   * The agent should periodically check this signal
-   * and stop gracefully if aborted.
-   */
+  /** AbortSignal for cancelling agent execution */
   signal?: AbortSignal;
+  /** Called when a tool needs explicit user approval to proceed */
+  requestToolApproval?: (request: { tool: string; args: Record<string, unknown> }) => Promise<ApprovalDecision>;
+  /** Shared set of tool names that have been session-approved (persists across queries) */
+  sessionApprovedTools?: Set<string>;
 }
 
 /**
- * =========================
- * Message (conversation memory)
- * =========================
- *
- * Represents ONE message in the agent’s internal history.
- * This history is passed back to the LLM on each step.
+ * Message in conversation history
  */
 export interface Message {
-  /**
-   * Who produced the message:
-   *  - user: original user input
-   *  - assistant: LLM reasoning / answers
-   *  - tool: output returned by a tool call
-   */
   role: 'user' | 'assistant' | 'tool';
-
-  /**
-   * Plain text content of the message.
-   * Tools stringify their output before storing it here.
-   */
   content: string;
 }
 
 // ============================================================================
-// Agent Events (real-time streaming + observability)
+// Agent Events (for real-time streaming UI)
 // ============================================================================
-//
-// These interfaces define EVENTS emitted while the agent runs.
-// The agent does NOT just return a final answer.
-// Instead, it streams progress updates as events.
-//
-// This enables:
-//  - live UIs (CLI / web)
-//  - debugging
-//  - performance tracking
-//  - transparency into agent behavior
-//
 
 /**
- * Emitted when the agent is reasoning / deciding next steps.
- * This is usually triggered before an LLM call.
+ * Agent is processing/thinking
  */
 export interface ThinkingEvent {
   type: 'thinking';
-
-  /**
-   * Human-readable message explaining
-   * what the agent is currently thinking about.
-   *
-   * Example:
-   *  "Deciding which tool to call next"
-   */
   message: string;
 }
 
 /**
- * Emitted immediately before a tool is executed.
- * Allows UI to show which tool is running.
+ * Tool execution started
  */
 export interface ToolStartEvent {
   type: 'tool_start';
-
-  /** Name of the tool being executed */
   tool: string;
-
-  /** Arguments passed to the tool */
   args: Record<string, unknown>;
 }
 
 /**
- * Emitted when a tool finishes successfully.
- * Contains timing + result for observability.
+ * Tool execution completed successfully
  */
 export interface ToolEndEvent {
   type: 'tool_end';
-
-  /** Tool name */
   tool: string;
-
-  /** Arguments used */
   args: Record<string, unknown>;
-
-  /** Tool result (stringified) */
   result: string;
-
-  /** Execution time in milliseconds */
   duration: number;
 }
 
 /**
- * Emitted when a tool execution fails.
- * This does NOT crash the agent automatically.
- * The agent can decide how to recover.
+ * Tool execution failed
  */
 export interface ToolErrorEvent {
   type: 'tool_error';
-
-  /** Tool that failed */
   tool: string;
-
-  /** Error message */
   error: string;
 }
 
 /**
- * Emitted during long-running tool execution.
- * Useful for streaming progress updates.
+ * Mid-execution progress update from a subagent tool
  */
 export interface ToolProgressEvent {
   type: 'tool_progress';
-
-  /** Tool emitting progress */
   tool: string;
-
-  /** Progress message (e.g., "Fetched page 3/10") */
   message: string;
 }
 
 /**
- * Emitted when a tool is approaching or exceeding
- * recommended usage limits.
- *
- * IMPORTANT:
- *  - This is a warning, not a hard block.
- *  - The agent remains autonomous.
+ * Tool call warning due to approaching/exceeding suggested limits
  */
 export interface ToolLimitEvent {
   type: 'tool_limit';
-
-  /** Tool name */
   tool: string;
-
-  /** Optional warning message */
+  /** Warning message about tool usage limits */
   warning?: string;
-
-  /**
-   * Whether the tool call was blocked.
-   * Always false in this design.
-   * We warn, but never hard-stop tools.
-   */
+  /** Whether the tool call was blocked (always false - we only warn, never block) */
   blocked: boolean;
 }
 
 /**
- * Emitted when agent context is trimmed
- * due to token limits.
- *
- * Common in Anthropic-style sliding context windows.
+ * Tool approval decision event for sensitive tools.
+ */
+export interface ToolApprovalEvent {
+  type: 'tool_approval';
+  tool: string;
+  args: Record<string, unknown>;
+  approved: ApprovalDecision;
+}
+
+/**
+ * Tool execution was denied by user approval flow.
+ */
+export interface ToolDeniedEvent {
+  type: 'tool_denied';
+  tool: string;
+  args: Record<string, unknown>;
+}
+
+/**
+ * Context was cleared due to exceeding token threshold (Anthropic-style)
  */
 export interface ContextClearedEvent {
   type: 'context_cleared';
-
-  /** Number of old tool results removed */
+  /** Number of tool results that were cleared from context */
   clearedCount: number;
-
-  /** Number of recent tool results preserved */
+  /** Number of most recent tool results that were kept */
   keptCount: number;
 }
 
 /**
- * Emitted when the agent stops tool usage
- * and begins generating the final answer.
- */
-export interface AnswerStartEvent {
-  type: 'answer_start';
-}
-
-/**
- * Token usage statistics for a full agent run.
- * Useful for cost estimation and performance tracking.
+ * Token usage statistics
  */
 export interface TokenUsage {
   inputTokens: number;
@@ -248,48 +134,20 @@ export interface TokenUsage {
 }
 
 /**
- * Final event emitted when the agent completes.
- * This is the terminal event in the agent lifecycle.
+ * Agent completed with final result
  */
 export interface DoneEvent {
   type: 'done';
-
-  /** Final answer returned to the user */
   answer: string;
-
-  /**
-   * Summary of all tool calls made during execution.
-   * Useful for debugging and auditing.
-   */
-  toolCalls: Array<{
-    tool: string;
-    args: Record<string, unknown>;
-    result: string;
-  }>;
-
-  /** Number of agent iterations used */
+  toolCalls: Array<{ tool: string; args: Record<string, unknown>; result: string }>;
   iterations: number;
-
-  /** Total execution time in milliseconds */
   totalTime: number;
-
-  /** Optional token usage stats */
   tokenUsage?: TokenUsage;
-
-  /** Optional throughput metric */
   tokensPerSecond?: number;
 }
 
 /**
- * =========================
- * AgentEvent (union type)
- * =========================
- *
- * This union represents EVERY possible event
- * the agent can emit during execution.
- *
- * Consumers (UI, logs, analytics) can switch
- * on `event.type` to react appropriately.
+ * Union type for all agent events
  */
 export type AgentEvent =
   | ThinkingEvent
@@ -297,7 +155,20 @@ export type AgentEvent =
   | ToolProgressEvent
   | ToolEndEvent
   | ToolErrorEvent
+  | ToolApprovalEvent
+  | ToolDeniedEvent
   | ToolLimitEvent
   | ContextClearedEvent
-  | AnswerStartEvent
   | DoneEvent;
+
+/**
+ * Aggregated event used by the CLI history renderer.
+ * Combines lifecycle events (tool_start/tool_end/tool_error) into a single display row.
+ */
+export interface DisplayEvent {
+  id: string;
+  event: AgentEvent;
+  completed?: boolean;
+  endEvent?: AgentEvent;
+  progressMessage?: string;
+}

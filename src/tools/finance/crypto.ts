@@ -1,83 +1,72 @@
-/**
- * ============================================================
- * CRYPTOCURRENCY TOOLS (Financial Datasets API)
- * ============================================================
- *
- * Tools for cryptocurrency price data:
- *   1. get_crypto_price_snapshot — current crypto price
- *   2. get_crypto_prices — historical crypto OHLCV data
- *
- * TICKER FORMAT:
- *   - 'BTC-USD' for Bitcoin in USD
- *   - 'ETH-USD' for Ethereum in USD
- *   - 'BTC-ETH' for Bitcoin priced in Ethereum
- */
+import { DynamicStructuredTool } from '@langchain/core/tools';
+import { z } from 'zod';
+import { callApi } from './api.js';
+import { formatToolResult } from '../types.js';
 
-import { DynamicStructuredTool } from "@langchain/core/tools";
-import { z } from "zod";
-import { callApi } from "./api";
-import { formatToolResult } from "../types";
-
-// ============================================================================
-// Crypto Price Snapshot
-// ============================================================================
+const CryptoPriceSnapshotInputSchema = z.object({
+  ticker: z
+    .string()
+    .describe(
+      "The crypto ticker symbol to fetch the price snapshot for. For example, 'BTC-USD' for Bitcoin."
+    ),
+});
 
 export const getCryptoPriceSnapshot = new DynamicStructuredTool({
-  name: "get_crypto_price_snapshot",
-
-  description:
-    "Fetches the most recent price snapshot for a cryptocurrency. " +
-    "Ticker format: 'BTC-USD' for Bitcoin, 'ETH-USD' for Ethereum.",
-
-  schema: z.object({
-    ticker: z
-      .string()
-      .describe("Crypto ticker (e.g., 'BTC-USD' for Bitcoin, 'ETH-USD' for Ethereum)."),
-  }),
-
+  name: 'get_crypto_price_snapshot',
+  description: `Fetches the most recent price snapshot for a specific cryptocurrency, including the latest price, trading volume, and other open, high, low, and close price data. Ticker format: use 'CRYPTO-USD' for USD prices (e.g., 'BTC-USD') or 'CRYPTO-CRYPTO' for crypto-to-crypto prices (e.g., 'BTC-ETH' for Bitcoin priced in Ethereum).`,
+  schema: CryptoPriceSnapshotInputSchema,
   func: async (input) => {
-    const params = { ticker: input.ticker.trim().toUpperCase() };
-    const { data, url } = await callApi("/crypto/prices/snapshot/", params);
+    const params = { ticker: input.ticker };
+    const { data, url } = await callApi('/crypto/prices/snapshot/', params);
     return formatToolResult(data.snapshot || {}, [url]);
   },
 });
 
-// ============================================================================
-// Historical Crypto Prices
-// ============================================================================
+const CryptoPricesInputSchema = z.object({
+  ticker: z
+    .string()
+    .describe(
+      "The crypto ticker symbol to fetch aggregated prices for. For example, 'BTC-USD' for Bitcoin."
+    ),
+  interval: z
+    .enum(['minute', 'day', 'week', 'month', 'year'])
+    .default('day')
+    .describe("The time interval for price data. Defaults to 'day'."),
+  interval_multiplier: z
+    .number()
+    .default(1)
+    .describe('Multiplier for the interval. Defaults to 1.'),
+  start_date: z.string().describe('Start date in YYYY-MM-DD format. Required.'),
+  end_date: z.string().describe('End date in YYYY-MM-DD format. Required.'),
+});
 
 export const getCryptoPrices = new DynamicStructuredTool({
-  name: "get_crypto_prices",
-
-  description:
-    "Retrieves historical crypto price data (OHLCV) over a date range. " +
-    "Ticker format: 'BTC-USD', 'ETH-USD', etc.",
-
-  schema: z.object({
-    ticker: z
-      .string()
-      .describe("Crypto ticker (e.g., 'BTC-USD')."),
-    interval: z
-      .enum(["minute", "day", "week", "month", "year"])
-      .default("day")
-      .describe("Time interval for price data (default: day)."),
-    interval_multiplier: z
-      .number()
-      .default(1)
-      .describe("Multiplier for the interval (default: 1)."),
-    start_date: z.string().describe("Start date in YYYY-MM-DD format."),
-    end_date: z.string().describe("End date in YYYY-MM-DD format."),
-  }),
-
+  name: 'get_crypto_prices',
+  description: `Retrieves historical price data for a cryptocurrency over a specified date range, including open, high, low, close prices, and volume. Ticker format: use 'CRYPTO-USD' for USD prices (e.g., 'BTC-USD') or 'CRYPTO-CRYPTO' for crypto-to-crypto prices (e.g., 'BTC-ETH' for Bitcoin priced in Ethereum).`,
+  schema: CryptoPricesInputSchema,
   func: async (input) => {
     const params = {
-      ticker: input.ticker.trim().toUpperCase(),
+      ticker: input.ticker,
       interval: input.interval,
       interval_multiplier: input.interval_multiplier,
       start_date: input.start_date,
       end_date: input.end_date,
     };
-    const { data, url } = await callApi("/crypto/prices/", params);
+    // Cache when the date window is fully closed (OHLCV data is final)
+    const endDate = new Date(input.end_date + 'T00:00:00');
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const { data, url } = await callApi('/crypto/prices/', params, { cacheable: endDate < today });
     return formatToolResult(data.prices || [], [url]);
+  },
+});
+
+export const getCryptoTickers = new DynamicStructuredTool({
+  name: 'get_available_crypto_tickers',
+  description: `Retrieves the list of available cryptocurrency tickers that can be used with the crypto price tools.`,
+  schema: z.object({}),
+  func: async () => {
+    const { data, url } = await callApi('/crypto/prices/tickers/', {});
+    return formatToolResult(data.tickers || [], [url]);
   },
 });

@@ -1,146 +1,114 @@
-/**
- * ============================================================
- * FINANCIAL STATEMENTS TOOLS (Financial Datasets API)
- * ============================================================
- *
- * These tools fetch fundamental financial data from the Financial
- * Datasets API (https://api.financialdatasets.ai):
- *   - Income Statements (revenue, profit, EPS)
- *   - Balance Sheets (assets, liabilities, equity)
- *   - Cash Flow Statements (operating, investing, financing flows)
- *   - All Financial Statements (combined, single API call)
- *
- * INSPIRED BY DEXTER:
- * -------------------
- * These tools follow Dexter's pattern of:
- *   1. Shared schema for common parameters
- *   2. createParams() helper to DRY up parameter construction
- *   3. stripFieldsDeep() to reduce token usage
- *   4. Date filtering with report_period_gte/lte operators
- *   5. TTM (trailing twelve months) period support
- */
-
-import { DynamicStructuredTool } from "@langchain/core/tools";
-import { z } from "zod";
-import { callApi, stripFieldsDeep } from "./api";
-import { formatToolResult } from "../types";
+import { DynamicStructuredTool } from '@langchain/core/tools';
+import { z } from 'zod';
+import { callApi, stripFieldsDeep } from './api.js';
+import { formatToolResult } from '../types.js';
 
 const REDUNDANT_FINANCIAL_FIELDS = ['accession_number', 'currency', 'period'] as const;
 
-/**
- * Shared schema for all financial statement tools.
- * All tools accept the same parameters — the LLM learns ONE pattern.
- */
 const FinancialStatementsInputSchema = z.object({
   ticker: z
     .string()
-    .describe("The stock ticker symbol (e.g., 'AAPL' for Apple)."),
+    .describe(
+      "The stock ticker symbol to fetch financial statements for. For example, 'AAPL' for Apple."
+    ),
   period: z
-    .enum(["annual", "quarterly", "ttm"])
-    .default("annual")
-    .describe("'annual' for yearly, 'quarterly' for quarterly, 'ttm' for trailing twelve months."),
+    .enum(['annual', 'quarterly', 'ttm'])
+    .describe(
+      "The reporting period for the financial statements. 'annual' for yearly, 'quarterly' for quarterly, and 'ttm' for trailing twelve months."
+    ),
   limit: z
     .number()
     .default(4)
-    .describe("Maximum number of report periods to return (default: 4)."),
+    .describe(
+      'Maximum number of report periods to return (default: 4). Returns the most recent N periods based on the period type. Increase this for longer historical analysis when needed.'
+    ),
+  report_period_gt: z
+    .string()
+    .optional()
+    .describe('Filter for financial statements with report periods after this date (YYYY-MM-DD).'),
   report_period_gte: z
     .string()
     .optional()
-    .describe("Filter: report periods on or after this date (YYYY-MM-DD)."),
+    .describe(
+      'Filter for financial statements with report periods on or after this date (YYYY-MM-DD).'
+    ),
+  report_period_lt: z
+    .string()
+    .optional()
+    .describe('Filter for financial statements with report periods before this date (YYYY-MM-DD).'),
   report_period_lte: z
     .string()
     .optional()
-    .describe("Filter: report periods on or before this date (YYYY-MM-DD)."),
+    .describe(
+      'Filter for financial statements with report periods on or before this date (YYYY-MM-DD).'
+    ),
 });
 
-function createParams(
-  input: z.infer<typeof FinancialStatementsInputSchema>
-): Record<string, string | number | undefined> {
+function createParams(input: z.infer<typeof FinancialStatementsInputSchema>): Record<string, string | number | undefined> {
   return {
-    ticker: input.ticker.trim().toUpperCase(),
+    ticker: input.ticker,
     period: input.period,
     limit: input.limit,
+    report_period_gt: input.report_period_gt,
     report_period_gte: input.report_period_gte,
+    report_period_lt: input.report_period_lt,
     report_period_lte: input.report_period_lte,
   };
 }
 
-// ============================================================================
-// Income Statements
-// ============================================================================
-
 export const getIncomeStatements = new DynamicStructuredTool({
-  name: "get_income_statements",
-  description:
-    "Fetches a company's income statements: revenues, expenses, net income, EPS. " +
-    "Useful for evaluating profitability and operational efficiency.",
+  name: 'get_income_statements',
+  description: `Fetches a company's income statements, detailing its revenues, expenses, net income, etc. over a reporting period. Useful for evaluating a company's profitability and operational efficiency.`,
   schema: FinancialStatementsInputSchema,
   func: async (input) => {
     const params = createParams(input);
-    const { data, url } = await callApi("/financials/income-statements/", params);
+    const { data, url } = await callApi('/financials/income-statements/', params);
     return formatToolResult(
-      stripFieldsDeep(data.income_statements || [], REDUNDANT_FINANCIAL_FIELDS),
+      stripFieldsDeep(data.income_statements || {}, REDUNDANT_FINANCIAL_FIELDS),
       [url]
     );
   },
 });
-
-// ============================================================================
-// Balance Sheets
-// ============================================================================
 
 export const getBalanceSheets = new DynamicStructuredTool({
-  name: "get_balance_sheets",
-  description:
-    "Retrieves a company's balance sheets: assets, liabilities, equity, debt, cash. " +
-    "Useful for assessing financial health and leverage.",
+  name: 'get_balance_sheets',
+  description: `Retrieves a company's balance sheets, providing a snapshot of its assets, liabilities, shareholders' equity, etc. at a specific point in time. Useful for assessing a company's financial position.`,
   schema: FinancialStatementsInputSchema,
   func: async (input) => {
     const params = createParams(input);
-    const { data, url } = await callApi("/financials/balance-sheets/", params);
+    const { data, url } = await callApi('/financials/balance-sheets/', params);
     return formatToolResult(
-      stripFieldsDeep(data.balance_sheets || [], REDUNDANT_FINANCIAL_FIELDS),
+      stripFieldsDeep(data.balance_sheets || {}, REDUNDANT_FINANCIAL_FIELDS),
       [url]
     );
   },
 });
-
-// ============================================================================
-// Cash Flow Statements
-// ============================================================================
 
 export const getCashFlowStatements = new DynamicStructuredTool({
-  name: "get_cash_flow_statements",
-  description:
-    "Retrieves cash flow statements: operating, investing, financing activities, free cash flow. " +
-    "Useful for understanding liquidity and cash generation.",
+  name: 'get_cash_flow_statements',
+  description: `Retrieves a company's cash flow statements, showing how cash is generated and used across operating, investing, and financing activities. Useful for understanding a company's liquidity and solvency.`,
   schema: FinancialStatementsInputSchema,
   func: async (input) => {
     const params = createParams(input);
-    const { data, url } = await callApi("/financials/cash-flow-statements/", params);
+    const { data, url } = await callApi('/financials/cash-flow-statements/', params);
     return formatToolResult(
-      stripFieldsDeep(data.cash_flow_statements || [], REDUNDANT_FINANCIAL_FIELDS),
+      stripFieldsDeep(data.cash_flow_statements || {}, REDUNDANT_FINANCIAL_FIELDS),
       [url]
     );
   },
 });
 
-// ============================================================================
-// All Financial Statements (combined — Dexter pattern)
-// ============================================================================
-
 export const getAllFinancialStatements = new DynamicStructuredTool({
-  name: "get_all_financial_statements",
-  description:
-    "Retrieves all three financial statements (income, balance sheet, cash flow) in one API call. " +
-    "More efficient when you need comprehensive financial analysis.",
+  name: 'get_all_financial_statements',
+  description: `Retrieves all three financial statements (income statements, balance sheets, and cash flow statements) for a company in a single API call. This is more efficient than calling each statement type separately when you need all three for comprehensive financial analysis.`,
   schema: FinancialStatementsInputSchema,
   func: async (input) => {
     const params = createParams(input);
-    const { data, url } = await callApi("/financials/", params);
+    const { data, url } = await callApi('/financials/', params);
     return formatToolResult(
       stripFieldsDeep(data.financials || {}, REDUNDANT_FINANCIAL_FIELDS),
       [url]
     );
   },
 });
+
